@@ -1,0 +1,60 @@
+# Academic Plagiarism Intelligence System
+
+## Overview
+This project is an advanced Python-based plagiarism detection and text analysis system designed to analyze large academic datasets using multiple pattern searching algorithms.
+
+The system simulates 500 student submissions and detects copied content, repeated technical definitions, and document similarity using intelligent pattern matching techniques.
+
+---
+
+## Algorithms Implemented
+- KMP (Knuth-Morris-Pratt)
+- Rabin-Karp
+- Boyer-Moore
+- Naive Pattern Matching
+
+---
+
+## Features
+- Simulates 500 academic documents
+- Detects copied paragraphs and repeated patterns
+- Calculates document similarity percentage
+- Finds matched text positions
+- Generates plagiarism risk levels
+- Benchmarks algorithm performance
+- Produces graphical analytical reports
+- Displays top repeated patterns
+- Generates similarity heatmaps
+
+---
+
+## Technologies Used
+- Python 3.x
+- Matplotlib
+- NumPy
+- Rich Library
+
+---
+
+## Python Libraries Used
+
+| Library | Purpose |
+|---|---|
+| random | Generate synthetic documents |
+| time | Measure execution time |
+| hashlib | Fingerprint generation |
+| difflib | Similarity comparison |
+| itertools | Pairwise combinations |
+| collections | Frequency counting |
+| dataclasses | Structured result storage |
+| typing | Type hints |
+| numpy | Numerical operations |
+| matplotlib | Graphical visualization |
+| rich | Advanced terminal UI |
+
+---
+
+## Required Library Installation
+
+```bash
+pip install matplotlib numpy rich
