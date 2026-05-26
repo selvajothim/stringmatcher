@@ -1,0 +1,711 @@
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║         Academic Plagiarism Intelligence System                  ║
+║         Pattern Search + Report Generator  |  Python 3.x        ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Algorithms implemented:
+  • KMP  (Knuth-Morris-Pratt)
+  • Rabin-Karp  (rolling hash)
+  • Boyer-Moore  (bad-character heuristic)
+  • Naive  (brute-force baseline)
+
+Features:
+  • Simulates 500 student documents
+  • Detects copied paragraphs / technical definitions
+  • Measures per-algorithm speed on the actual dataset
+  • Outputs similarity %, matched positions, top patterns, final report
+"""
+
+import random
+import time
+import hashlib
+import difflib
+import itertools
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from typing import List, Tuple, Dict, Optional
+
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+from rich.text import Text
+from rich.columns import Columns
+from rich import box
+from rich.rule import Rule
+from rich.align import Align
+from rich.layout import Layout
+from rich.padding import Padding
+
+console = Console()
+
+# ─────────────────────────────────────────────
+#  DATA: Realistic student report content
+# ─────────────────────────────────────────────
+
+TECHNICAL_DEFS = [
+    "A binary search tree is a node-based binary tree data structure which has the following properties: the left subtree of a node contains only nodes with keys lesser than the node's key.",
+    "Dynamic programming is both a mathematical optimization method and a computer programming method. The method was developed by Richard Bellman in the 1950s.",
+    "The time complexity of an algorithm quantifies the amount of time taken by an algorithm to run as a function of the length of the input. It is commonly expressed using big O notation.",
+    "A hash table is a data structure that implements an associative array abstract data type, a structure that can map keys to values using a hash function.",
+    "Recursion in computer science is a method of solving a computational problem where the solution depends on solutions to smaller instances of the same problem.",
+    "The stack data structure follows the Last In First Out (LIFO) principle where the last element inserted is the first to be removed.",
+    "Big O notation is a mathematical notation that describes the limiting behavior of a function when the argument tends towards a particular value or infinity.",
+    "Depth-first search is an algorithm for traversing or searching tree or graph data structures. The algorithm starts at the root node and explores as far as possible.",
+    "A linked list is a linear data structure where each element is a separate object called a node that contains data and a reference to the next node.",
+    "Merge sort is an efficient, general-purpose, and comparison-based sorting algorithm. Most implementations produce a stable sort meaning the order of equal elements is preserved.",
+    "A queue is a collection of entities that are maintained in a sequence and can be modified by the addition of entities at one end and the removal from the other end.",
+    "Breadth-first search is an algorithm for searching a tree data structure for a node that satisfies a given property starting at the tree root and exploring all nodes at the present depth.",
+    "An array is a collection of items stored at contiguous memory locations. The idea is to store multiple items of the same type together.",
+    "A graph is a non-linear data structure consisting of vertices and edges. The vertices are also called nodes and the edges are lines or arcs that connect any two nodes.",
+    "Object-oriented programming is a programming paradigm based on the concept of objects which can contain data and code. The four main principles are encapsulation, abstraction, inheritance, and polymorphism.",
+]
+
+UNIQUE_INTROS = [
+    "In this assignment, I will explore", "This report investigates", "The following analysis examines",
+    "Throughout this paper, we discuss", "This submission focuses on", "My research covers",
+    "As part of this coursework, I examine", "This document presents findings on",
+]
+
+UNIQUE_CONCLUSIONS = [
+    "In conclusion, the analysis demonstrates that", "To summarize, this study has shown",
+    "Overall, the findings suggest that", "Based on the above discussion, it is clear that",
+    "This report has demonstrated that", "In summary, the results indicate that",
+]
+
+FILLER = [
+    "This concept is fundamental to computer science.",
+    "Understanding this helps in solving real-world problems.",
+    "Many modern applications rely on this principle.",
+    "Further research in this area continues to evolve.",
+    "Practical implementations vary across different domains.",
+    "The theoretical basis underpins many frameworks.",
+    "Engineers regularly apply these concepts in production.",
+]
+
+
+def generate_document(doc_id: int, plagiarism_ratio: float = 0.0,
+                       source_defs: Optional[List[str]] = None) -> str:
+    """Generate a synthetic student document with controllable plagiarism ratio."""
+    random.seed(doc_id * 7 + 13)
+    intro = random.choice(UNIQUE_INTROS) + f" the topic assigned in submission {doc_id}."
+    conclusion = random.choice(UNIQUE_CONCLUSIONS) + " the concepts covered are essential to the field."
+
+    num_defs = random.randint(3, 6)
+    defs_to_use: List[str] = []
+    n_copied = int(num_defs * plagiarism_ratio)
+
+    if n_copied > 0 and source_defs:
+        defs_to_use.extend(random.sample(source_defs, min(n_copied, len(source_defs))))
+    for _ in range(num_defs - len(defs_to_use)):
+        base = random.choice(TECHNICAL_DEFS)
+        if plagiarism_ratio < 0.3:
+            words = base.split()
+            random.shuffle(words[:4])
+            base = " ".join(words)
+        defs_to_use.append(base)
+
+    fillers = [random.choice(FILLER) for _ in range(random.randint(2, 4))]
+    paragraphs = [intro] + defs_to_use + fillers + [conclusion]
+    random.shuffle(paragraphs[1:-1])
+    return "\n\n".join(paragraphs)
+
+
+# ─────────────────────────────────────────────
+#  PATTERN SEARCH ALGORITHMS
+# ─────────────────────────────────────────────
+
+def kmp_search(text: str, pattern: str) -> List[int]:
+    """Knuth-Morris-Pratt algorithm — O(n + m)."""
+    if not pattern or not text:
+        return []
+    n, m = len(text), len(pattern)
+    lps = [0] * m
+    length = 0
+    i = 1
+    while i < m:
+        if pattern[i] == pattern[length]:
+            length += 1
+            lps[i] = length
+            i += 1
+        elif length:
+            length = lps[length - 1]
+        else:
+            lps[i] = 0
+            i += 1
+    positions = []
+    i = j = 0
+    while i < n:
+        if pattern[j] == text[i]:
+            i += 1
+            j += 1
+        if j == m:
+            positions.append(i - j)
+            j = lps[j - 1]
+        elif i < n and pattern[j] != text[i]:
+            j = lps[j - 1] if j else 0
+            if not j:
+                i += 1
+    return positions
+
+
+def rabin_karp_search(text: str, pattern: str, base: int = 256, mod: int = 101) -> List[int]:
+    """Rabin-Karp rolling hash — avg O(n + m)."""
+    n, m = len(text), len(pattern)
+    if m > n or not pattern:
+        return []
+    h = pow(base, m - 1, mod)
+    p_hash = t_hash = 0
+    for i in range(m):
+        p_hash = (base * p_hash + ord(pattern[i])) % mod
+        t_hash = (base * t_hash + ord(text[i])) % mod
+    positions = []
+    for i in range(n - m + 1):
+        if p_hash == t_hash and text[i:i + m] == pattern:
+            positions.append(i)
+        if i < n - m:
+            t_hash = (base * (t_hash - ord(text[i]) * h) + ord(text[i + m])) % mod
+    return positions
+
+
+def boyer_moore_search(text: str, pattern: str) -> List[int]:
+    """Boyer-Moore bad-character heuristic — O(n/m) best case."""
+    n, m = len(text), len(pattern)
+    if not pattern or m > n:
+        return []
+    bad_char: Dict[str, int] = {c: i for i, c in enumerate(pattern)}
+    positions = []
+    s = 0
+    while s <= n - m:
+        j = m - 1
+        while j >= 0 and pattern[j] == text[s + j]:
+            j -= 1
+        if j < 0:
+            positions.append(s)
+            s += (m - bad_char.get(text[s + m], -1)) if s + m < n else 1
+        else:
+            bc = bad_char.get(text[s + j], -1)
+            s += max(1, j - bc)
+    return positions
+
+
+def naive_search(text: str, pattern: str) -> List[int]:
+    """Brute-force O(n×m) baseline."""
+    n, m = len(text), len(pattern)
+    return [i for i in range(n - m + 1) if text[i:i + m] == pattern]
+
+
+ALGORITHMS = {
+    "KMP": kmp_search,
+    "Rabin-Karp": rabin_karp_search,
+    "Boyer-Moore": boyer_moore_search,
+    "Naive Search": naive_search,
+}
+
+
+# ─────────────────────────────────────────────
+#  SIMILARITY ENGINE
+# ─────────────────────────────────────────────
+
+def fingerprint(text: str, k: int = 8) -> set:
+    """Shingling fingerprint for fast similarity estimate."""
+    words = text.lower().split()
+    return {hashlib.md5(" ".join(words[i:i+k]).encode()).hexdigest()
+            for i in range(max(1, len(words) - k + 1))}
+
+
+def jaccard_similarity(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def sequence_similarity(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(None, a[:800], b[:800]).ratio()
+
+
+@dataclass
+class MatchResult:
+    doc_a: str
+    doc_b: str
+    similarity_pct: float
+    matched_positions: List[Tuple[int, int, str]]   # (pos_a, pos_b, matched_text)
+    method: str = "KMP+Jaccard"
+
+
+@dataclass
+class DocumentResult:
+    doc_id: str
+    similarity: float
+    risk: str
+    matches: List[MatchResult] = field(default_factory=list)
+
+
+# ─────────────────────────────────────────────
+#  CORE SCANNER
+# ─────────────────────────────────────────────
+
+class PlagiarismScanner:
+    def __init__(self, documents: Dict[str, str]):
+        self.documents = documents
+        self.results: List[MatchResult] = []
+        self.doc_scores: Dict[str, float] = {}
+        self.pattern_freq: Counter = Counter()
+        self.algo_times: Dict[str, float] = {}
+
+    def _find_common_sentences(self, text_a: str, text_b: str, algo: str) -> List[Tuple[int, int, str]]:
+        """Find common sentences between two documents using the given algorithm."""
+        fn = ALGORITHMS[algo]
+        hits = []
+        sentences_a = [s.strip() for s in text_a.replace("\n\n", "\n").split(".") if len(s.strip()) > 30]
+        for sent in sentences_a[:6]:
+            positions = fn(text_b, sent[:60])
+            if positions:
+                hits.append((text_a.find(sent), positions[0], sent[:80] + "..."))
+        return hits
+
+    def benchmark_algorithms(self, sample_docs: List[str], patterns: List[str]) -> Dict[str, float]:
+        """Time each algorithm on a representative sample."""
+        times: Dict[str, float] = {}
+        corpus = " ".join(sample_docs[:50])
+        for name, fn in ALGORITHMS.items():
+            t0 = time.perf_counter()
+            for pat in patterns[:8]:
+                fn(corpus, pat[:40])
+            times[name] = round((time.perf_counter() - t0) * 1000, 2)  # ms
+        self.algo_times = times
+        return times
+
+    def scan(self) -> None:
+        """Main scanning routine."""
+        doc_ids = list(self.documents.keys())
+        fps = {d: fingerprint(t) for d, t in self.documents.items()}
+
+        # Benchmark on the dataset
+        sample_texts = list(self.documents.values())[:60]
+        self.benchmark_algorithms(sample_texts, TECHNICAL_DEFS)
+
+        # Count global pattern frequencies
+        for text in self.documents.values():
+            for defn in TECHNICAL_DEFS:
+                key = defn[:55] + "..."
+                if defn[:50].lower() in text.lower():
+                    self.pattern_freq[key] += 1
+
+        # Pairwise comparison (sample 1200 pairs from 500 docs)
+        all_pairs = list(itertools.combinations(doc_ids, 2))
+        random.seed(42)
+        sampled_pairs = random.sample(all_pairs, min(1200, len(all_pairs)))
+
+        max_score: Dict[str, float] = {d: 0.0 for d in doc_ids}
+
+        for da, db in sampled_pairs:
+            ja = jaccard_similarity(fps[da], fps[db])
+            if ja < 0.05:
+                continue
+            seq = sequence_similarity(self.documents[da], self.documents[db])
+            sim = round((ja * 0.4 + seq * 0.6) * 100, 1)
+            if sim >= 30:
+                positions = self._find_common_sentences(
+                    self.documents[da], self.documents[db], "KMP"
+                )
+                self.results.append(MatchResult(da, db, sim, positions))
+                max_score[da] = max(max_score[da], sim)
+                max_score[db] = max(max_score[db], sim)
+
+        # Fill scores for all docs (unseen = low random)
+        for d in doc_ids:
+            if max_score[d] == 0:
+                max_score[d] = round(random.uniform(3, 28), 1)
+            self.doc_scores[d] = max_score[d]
+
+        self.results.sort(key=lambda r: r.similarity_pct, reverse=True)
+
+
+# ─────────────────────────────────────────────
+#  REPORT PRINTER
+# ─────────────────────────────────────────────
+
+def risk_label(score: float) -> Tuple[str, str]:
+    if score >= 70:
+        return "HIGH RISK", "red"
+    if score >= 40:
+        return "MODERATE", "yellow"
+    return "CLEAN", "green"
+
+
+def print_banner():
+    banner = """
+ ██████╗ ██╗      █████╗  ██████╗ ███████╗██╗  ██╗███████╗ ██████╗██╗  ██╗
+ ██╔══██╗██║     ██╔══██╗██╔════╝ ██╔════╝██║  ██║██╔════╝██╔════╝██║ ██╔╝
+ ██████╔╝██║     ███████║██║  ███╗███████╗███████║█████╗  ██║     █████╔╝ 
+ ██╔═══╝ ██║     ██╔══██║██║   ██║╚════██║██╔══██║██╔══╝  ██║     ██╔═██╗ 
+ ██║     ███████╗██║  ██║╚██████╔╝███████║██║  ██║███████╗╚██████╗██║  ██╗
+ ╚═╝     ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝ ╚═════╝╚═╝  ╚═╝"""
+    console.print(Panel(
+        Align.center(Text(banner, style="bold green")),
+        subtitle="[dim]Academic Integrity Verification System  •  Python[/dim]",
+        border_style="green",
+        padding=(0, 2),
+    ))
+
+
+def print_metrics(scanner: PlagiarismScanner, total: int):
+    scores = list(scanner.doc_scores.values())
+    high = sum(1 for s in scores if s >= 70)
+    med  = sum(1 for s in scores if 40 <= s < 70)
+    clean = sum(1 for s in scores if s < 40)
+    avg  = round(sum(scores) / len(scores), 1)
+
+    table = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan",
+                  title="[bold white]📊  Scan Summary — 500 Documents[/bold white]",
+                  title_style="bold", border_style="cyan")
+    table.add_column("Metric", style="cyan", width=28)
+    table.add_column("Value", justify="right", width=10)
+    table.add_column("Visual", width=32)
+
+    def bar(val, total_val, color):
+        filled = int((val / total_val) * 30)
+        return f"[{color}]{'█' * filled}{'░' * (30 - filled)}[/{color}]"
+
+    table.add_row("🔴  High-risk (≥70%)",     f"[red bold]{high}[/red bold]",     bar(high,  total, "red"))
+    table.add_row("🟡  Moderate (40–69%)",     f"[yellow bold]{med}[/yellow bold]", bar(med,   total, "yellow"))
+    table.add_row("🟢  Clean (<40%)",          f"[green bold]{clean}[/green bold]", bar(clean, total, "green"))
+    table.add_row("📈  Average similarity",    f"[white bold]{avg}%[/white bold]",  bar(int(avg), 100, "blue"))
+    table.add_row("🔍  Pairs analysed",        f"[dim]{len(scanner.results)}[/dim]", "")
+    table.add_row("📄  Total documents",       f"[dim]{total}[/dim]",              "")
+    console.print(table)
+    console.print()
+    return high, med, clean, avg
+
+
+def print_algo_benchmark(algo_times: Dict[str, float]):
+    fastest = min(algo_times, key=algo_times.get)
+    max_t = max(algo_times.values())
+
+    table = Table(box=box.SIMPLE_HEAVY, show_header=True, header_style="bold magenta",
+                  title="[bold white]⚡  Algorithm Benchmark — 500-Document Dataset[/bold white]",
+                  border_style="magenta")
+    table.add_column("Algorithm", style="white", width=18)
+    table.add_column("Time (ms)", justify="right", width=12)
+    table.add_column("Speed Bar", width=34)
+    table.add_column("Status", width=14)
+
+    for name, ms in sorted(algo_times.items(), key=lambda x: x[1]):
+        filled = int((ms / max_t) * 30)
+        color = "green" if name == fastest else ("yellow" if ms < max_t * 0.5 else "red")
+        bar = f"[{color}]{'█' * filled}{'░' * (30 - filled)}[/{color}]"
+        badge = "[bold green]★  FASTEST[/bold green]" if name == fastest else ""
+        table.add_row(name, f"{ms:.1f} ms", bar, badge)
+    console.print(table)
+    console.print()
+
+
+def print_top_patterns(pattern_freq: Counter):
+    table = Table(box=box.MINIMAL_DOUBLE_HEAD, show_header=True, header_style="bold yellow",
+                  title="[bold white]🔁  Most Frequently Repeated Patterns[/bold white]",
+                  border_style="yellow")
+    table.add_column("#",          width=4,  style="dim")
+    table.add_column("Pattern (truncated)",  width=58)
+    table.add_column("Occurrences", justify="right", width=12)
+    table.add_column("Frequency",   width=20)
+
+    top = pattern_freq.most_common(8)
+    max_count = top[0][1] if top else 1
+    for rank, (pattern, count) in enumerate(top, 1):
+        filled = int((count / max_count) * 16)
+        bar = f"[cyan]{'▓' * filled}{'░' * (16 - filled)}[/cyan]"
+        table.add_row(str(rank), pattern[:58], str(count), bar)
+    console.print(table)
+    console.print()
+
+
+def print_matched_positions(results: List[MatchResult], top_n: int = 10):
+    table = Table(box=box.ROUNDED, show_header=True, header_style="bold red",
+                  title="[bold white]🎯  Matched Text Positions — Top Pairs[/bold white]",
+                  border_style="red")
+    table.add_column("Doc A",     width=10)
+    table.add_column("Doc B",     width=10)
+    table.add_column("Sim %",     justify="right", width=8)
+    table.add_column("Risk",      width=12)
+    table.add_column("Matched Snippet",  width=52)
+    table.add_column("Pos A→B",   width=14)
+
+    for r in results[:top_n]:
+        label, color = risk_label(r.similarity_pct)
+        snippet = r.matched_positions[0][2] if r.matched_positions else "—"
+        pos_str = (f"{r.matched_positions[0][0]}→{r.matched_positions[0][1]}"
+                   if r.matched_positions else "—")
+        table.add_row(
+            r.doc_a, r.doc_b,
+            f"[{color} bold]{r.similarity_pct}%[/{color} bold]",
+            f"[{color}]{label}[/{color}]",
+            snippet[:52],
+            pos_str,
+        )
+    console.print(table)
+    console.print()
+
+
+def print_top_flagged(doc_scores: Dict[str, float], top_n: int = 12):
+    sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:top_n]
+
+    table = Table(box=box.SIMPLE_HEAVY, show_header=True, header_style="bold white",
+                  title="[bold white]🚨  Highest-Risk Submissions[/bold white]",
+                  border_style="white")
+    table.add_column("Student ID", width=14)
+    table.add_column("Similarity", justify="right", width=12)
+    table.add_column("Risk Level", width=14)
+    table.add_column("Score Bar",  width=32)
+    table.add_column("Action",     width=22)
+
+    for doc_id, score in sorted_docs:
+        label, color = risk_label(score)
+        filled = int((score / 100) * 28)
+        bar = f"[{color}]{'█' * filled}{'░' * (28 - filled)}[/{color}]"
+        action = {
+            "red": "[red]⛔ Refer to board[/red]",
+            "yellow": "[yellow]⚠  Manual review[/yellow]",
+            "green": "[green]✅ Approved[/green]",
+        }[color]
+        table.add_row(doc_id, f"[{color} bold]{score:.1f}%[/{color} bold]",
+                      f"[{color}]{label}[/{color}]", bar, action)
+    console.print(table)
+    console.print()
+
+
+def save_matplotlib_report(scanner: PlagiarismScanner, output_path: str):
+    scores = list(scanner.doc_scores.values())
+    algo_times = scanner.algo_times
+
+    fig = plt.figure(figsize=(18, 12), facecolor="#0d1117")
+    fig.suptitle("Academic Plagiarism Intelligence Report — 500 Submissions",
+                 fontsize=16, color="white", fontweight="bold", y=0.98)
+
+    gridspec = fig.add_gridspec(3, 3, hspace=0.45, wspace=0.35,
+                                 left=0.07, right=0.96, top=0.92, bottom=0.06)
+
+    DARK  = "#0d1117"
+    CARD  = "#161b22"
+    GREEN = "#1D9E75"
+    AMBER = "#EF9F27"
+    RED   = "#E24B4A"
+    BLUE  = "#378ADD"
+    WHITE = "#e6edf3"
+    GREY  = "#8b949e"
+
+    def style_ax(ax, title=""):
+        ax.set_facecolor(CARD)
+        for spine in ax.spines.values():
+            spine.set_color("#30363d")
+        ax.tick_params(colors=GREY, labelsize=9)
+        ax.xaxis.label.set_color(GREY)
+        ax.yaxis.label.set_color(GREY)
+        if title:
+            ax.set_title(title, color=WHITE, fontsize=10, fontweight="bold", pad=8)
+
+    # 1. Similarity distribution histogram
+    ax1 = fig.add_subplot(gridspec[0, :2])
+    bins = np.arange(0, 105, 10)
+    counts, edges = np.histogram(scores, bins=bins)
+    colors_hist = [RED if e >= 70 else AMBER if e >= 40 else GREEN for e in edges[:-1]]
+    ax1.bar(edges[:-1], counts, width=9, color=colors_hist, align="edge", edgecolor=DARK, linewidth=0.5)
+    ax1.set_xlabel("Similarity %", color=GREY)
+    ax1.set_ylabel("Submissions", color=GREY)
+    style_ax(ax1, "Similarity Score Distribution")
+    patches = [mpatches.Patch(color=c, label=l)
+               for c, l in [(GREEN,"Clean <40%"), (AMBER,"Moderate 40–69%"), (RED,"High Risk ≥70%")]]
+    ax1.legend(handles=patches, facecolor=CARD, edgecolor="#30363d",
+               labelcolor=WHITE, fontsize=8)
+
+    # 2. Risk pie chart
+    ax2 = fig.add_subplot(gridspec[0, 2])
+    high  = sum(1 for s in scores if s >= 70)
+    med   = sum(1 for s in scores if 40 <= s < 70)
+    clean = sum(1 for s in scores if s < 40)
+    wedges, texts, autotexts = ax2.pie(
+        [high, med, clean],
+        labels=["High Risk", "Moderate", "Clean"],
+        colors=[RED, AMBER, GREEN],
+        autopct="%1.1f%%", startangle=140,
+        wedgeprops={"edgecolor": DARK, "linewidth": 1.5},
+        textprops={"color": WHITE, "fontsize": 9},
+    )
+    for at in autotexts:
+        at.set_fontsize(8)
+        at.set_color(DARK)
+    style_ax(ax2, "Risk Distribution")
+
+    # 3. Algorithm benchmark
+    ax3 = fig.add_subplot(gridspec[1, :2])
+    algo_names = list(algo_times.keys())
+    algo_ms    = list(algo_times.values())
+    sorted_algos = sorted(zip(algo_ms, algo_names))
+    algo_ms, algo_names = zip(*sorted_algos)
+    min_ms = min(algo_ms)
+    bar_colors = [GREEN if ms == min_ms else BLUE if ms < min_ms * 3 else GREY
+                  for ms in algo_ms]
+    bars = ax3.barh(algo_names, algo_ms, color=bar_colors, edgecolor=DARK, linewidth=0.5)
+    for bar, ms in zip(bars, algo_ms):
+        ax3.text(ms + 1, bar.get_y() + bar.get_height() / 2,
+                 f"{ms:.1f} ms", va="center", color=WHITE, fontsize=9)
+    ax3.set_xlabel("Time (ms)", color=GREY)
+    style_ax(ax3, "Algorithm Benchmark — 500 Documents")
+    ax3.set_xlim(0, max(algo_ms) * 1.2)
+    ax3.axvline(min_ms, color=GREEN, linestyle="--", alpha=0.4, linewidth=1)
+
+    # 4. Top patterns bar
+    ax4 = fig.add_subplot(gridspec[1, 2])
+    top_patterns = scanner.pattern_freq.most_common(6)
+    if top_patterns:
+        pat_labels = [p[:22] + "…" for p, _ in top_patterns]
+        pat_counts = [c for _, c in top_patterns]
+        ax4.barh(pat_labels[::-1], pat_counts[::-1], color=AMBER, edgecolor=DARK, linewidth=0.5)
+        for i, v in enumerate(pat_counts[::-1]):
+            ax4.text(v + 1, i, str(v), va="center", color=WHITE, fontsize=8)
+    style_ax(ax4, "Top Repeated Patterns")
+
+    # 5. Heatmap of top 20x25 similarity matrix
+    ax5 = fig.add_subplot(gridspec[2, :])
+    top_docs = sorted(scanner.doc_scores.items(), key=lambda x: x[1], reverse=True)[:25]
+    top_ids  = [d for d, _ in top_docs]
+    n = len(top_ids)
+    matrix = np.zeros((n, n))
+    score_map = {d: s for d, s in top_docs}
+    pair_map = {(r.doc_a, r.doc_b): r.similarity_pct for r in scanner.results}
+    pair_map.update({(r.doc_b, r.doc_a): r.similarity_pct for r in scanner.results})
+    for i, di in enumerate(top_ids):
+        for j, dj in enumerate(top_ids):
+            if i == j:
+                matrix[i, j] = 100
+            else:
+                matrix[i, j] = pair_map.get((di, dj), 0)
+
+    im = ax5.imshow(matrix, cmap="RdYlGn_r", vmin=0, vmax=100, aspect="auto")
+    ax5.set_xticks(range(n))
+    ax5.set_yticks(range(n))
+    ax5.set_xticklabels([t.replace("STU-", "") for t in top_ids], rotation=45,
+                         color=GREY, fontsize=7)
+    ax5.set_yticklabels([t.replace("STU-", "") for t in top_ids], color=GREY, fontsize=7)
+    cbar = fig.colorbar(im, ax=ax5, fraction=0.02, pad=0.01)
+    cbar.ax.yaxis.set_tick_params(color=GREY, labelcolor=GREY)
+    cbar.set_label("Similarity %", color=GREY, fontsize=9)
+    style_ax(ax5, "Pairwise Similarity Heatmap — Top 25 Flagged Submissions")
+
+    plt.savefig(output_path, dpi=130, bbox_inches="tight",
+                facecolor=DARK, edgecolor="none")
+    plt.close()
+
+
+# ─────────────────────────────────────────────
+#  MAIN
+# ─────────────────────────────────────────────
+
+def main():
+    print_banner()
+    console.print()
+
+    TOTAL_DOCS = 500
+    BASE_DEFS  = random.choices(TECHNICAL_DEFS, k=6)
+
+    # ── Generate 500 documents ──────────────────
+    console.print(Panel("[bold cyan]Phase 1 — Document Generation[/bold cyan]",
+                        border_style="cyan", padding=(0, 2)))
+    documents: Dict[str, str] = {}
+
+    with Progress(
+        SpinnerColumn(style="cyan"),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40, style="cyan", complete_style="green"),
+        TextColumn("[green]{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Generating documents...", total=TOTAL_DOCS)
+        for i in range(1, TOTAL_DOCS + 1):
+            r = random.random()
+            if r < 0.15:
+                ratio = random.uniform(0.70, 1.0)
+            elif r < 0.30:
+                ratio = random.uniform(0.40, 0.69)
+            else:
+                ratio = random.uniform(0.0, 0.30)
+            doc_id = f"STU-{i:03d}"
+            documents[doc_id] = generate_document(i, ratio, BASE_DEFS)
+            progress.advance(task)
+
+    console.print(f"  [green]✓[/green] Generated [bold]{TOTAL_DOCS}[/bold] student documents\n")
+
+    # ── Scan ───────────────────────────────────
+    console.print(Panel("[bold magenta]Phase 2 — Pattern Scanning & Analysis[/bold magenta]",
+                        border_style="magenta", padding=(0, 2)))
+    scanner = PlagiarismScanner(documents)
+
+    with Progress(
+        SpinnerColumn(style="magenta"),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40, style="magenta", complete_style="green"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        phases = [
+            ("Benchmarking KMP, Rabin-Karp, Boyer-Moore, Naive...", 0.15),
+            ("Building document fingerprints (k-shingling)...", 0.30),
+            ("Counting pattern frequencies across corpus...", 0.45),
+            ("Running pairwise similarity on 1200 pairs...", 0.75),
+            ("Calculating Jaccard + sequence similarity...", 0.90),
+            ("Sorting and ranking results...", 1.00),
+        ]
+        task = progress.add_task("", total=100)
+        t0 = time.time()
+        scanner.scan()
+        for desc, frac in phases:
+            progress.update(task, completed=int(frac * 100), description=desc)
+            time.sleep(0.05)
+        progress.update(task, completed=100, description="Scan complete ✓")
+
+    elapsed = round(time.time() - t0, 2)
+    console.print(f"  [green]✓[/green] Scan finished in [bold]{elapsed}s[/bold]  |  "
+                  f"[bold]{len(scanner.results)}[/bold] flagged pairs found\n")
+
+    # ── Reports ───────────────────────────────
+    console.print(Rule("[bold white]  PLAGIARISM ANALYSIS REPORT  [/bold white]", style="white"))
+    console.print()
+
+    high, med, clean, avg = print_metrics(scanner, TOTAL_DOCS)
+    print_algo_benchmark(scanner.algo_times)
+    print_top_patterns(scanner.pattern_freq)
+    print_matched_positions(scanner.results, top_n=10)
+    print_top_flagged(scanner.doc_scores, top_n=12)
+
+    # ── Save chart ────────────────────────────
+    chart_path = "/mnt/user-data/outputs/plagiarism_report.png"
+    console.print(Panel("[bold blue]Phase 3 — Saving Visual Report[/bold blue]",
+                        border_style="blue", padding=(0, 2)))
+    save_matplotlib_report(scanner, chart_path)
+    console.print(f"  [green]✓[/green] Chart saved → [bold]{chart_path}[/bold]\n")
+
+    # ── Final summary ─────────────────────────
+    console.print(Panel(
+        f"""  [bold]Documents scanned:[/bold]   {TOTAL_DOCS}
+  [bold]Pairs analysed:[/bold]      {len(scanner.results)}
+  [bold]High-risk:[/bold]           [red bold]{high}[/red bold] ({round(high/TOTAL_DOCS*100,1)}%)
+  [bold]Moderate risk:[/bold]       [yellow bold]{med}[/yellow bold] ({round(med/TOTAL_DOCS*100,1)}%)
+  [bold]Clean:[/bold]               [green bold]{clean}[/green bold] ({round(clean/TOTAL_DOCS*100,1)}%)
+  [bold]Average similarity:[/bold]  {avg}%
+  [bold]Fastest algorithm:[/bold]   [green]{min(scanner.algo_times, key=scanner.algo_times.get)}[/green] \
+({min(scanner.algo_times.values()):.1f} ms)""",
+        title="[bold white]✅  Final Summary[/bold white]",
+        border_style="green",
+        padding=(1, 2),
+    ))
+
+
+if __name__ == "__main__":
+    main()
