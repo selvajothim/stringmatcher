@@ -1,0 +1,15 @@
+# Requirements
+
+## Software Requirements
+- Python 3.x
+- Visual Studio Code (Recommended IDE)
+- Command Prompt / Terminal
+
+---
+
+## Required Python Libraries
+
+Install all required libraries using:
+
+```bash
+pip install matplotlib numpy rich
